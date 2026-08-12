@@ -51,7 +51,7 @@ from urllib import request as urllib_request
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATA = ROOT / "data" / "hatescope_refined.jsonl"
+DEFAULT_DATA = ROOT / "data" / "hatescope_1330.jsonl"
 DEFAULT_OUTPUT_ROOT = ROOT / "outputs"
 
 VALID_GROUPS = [
@@ -572,7 +572,7 @@ def run_generation_with_cache(
     return outputs
 
 
-class OpenAICompatibleJudge:
+class OpenAICompatibleClient:
     def __init__(
         self,
         *,
@@ -596,12 +596,13 @@ class OpenAICompatibleJudge:
         self.retries = retries
 
     def generate_one(self, system_prompt: str, user_prompt: str) -> str:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
         payload = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            "messages": messages,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": self.max_tokens,
@@ -629,7 +630,7 @@ class OpenAICompatibleJudge:
 
 
 def run_openai_judge_generation(
-    judge: OpenAICompatibleJudge,
+    judge: OpenAICompatibleClient,
     prompts: list[tuple[str, str]],
     workers: int,
 ) -> list[str]:
@@ -672,7 +673,7 @@ def append_judge_cache(path: Path, items: list[dict[str, Any]]) -> None:
 
 
 def run_openai_judge_generation_with_cache(
-    judge: OpenAICompatibleJudge,
+    judge: OpenAICompatibleClient,
     prompts: list[tuple[str, str]],
     keys: list[str],
     workers: int,
@@ -830,8 +831,9 @@ def build_candidate_sampling_params(SamplingParams: Any, args: argparse.Namespac
 
 def write_run_config(out_dir: Path, args: argparse.Namespace) -> None:
     run_config = vars(args).copy()
-    if run_config.get("judge_api_key"):
-        run_config["judge_api_key"] = "***redacted***"
+    for key in ("model_api_key", "judge_api_key"):
+        if run_config.get(key):
+            run_config[key] = "***redacted***"
     (out_dir / "run_config.json").write_text(
         json.dumps(run_config, ensure_ascii=False, indent=2, default=str) + "\n",
         encoding="utf-8",
@@ -875,7 +877,7 @@ def write_sample_only_outputs(
     metrics = {
         "mode": "sample_only",
         "num_examples": len(records),
-        "candidate_model": args.model_path,
+        "candidate_model": args.model_api_model or args.model_path,
         "format_score": pct(
             (
                 mean([float(pred.valid_json) for pred in parsed_outputs])
@@ -897,8 +899,14 @@ def write_sample_only_outputs(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate HateScope with vLLM.")
-    parser.add_argument("--model-path", required=True, help="Candidate model path or HF id.")
+    parser = argparse.ArgumentParser(description="Evaluate HateScope with local vLLM models or OpenAI-compatible APIs.")
+    parser.add_argument("--model-path", default=None, help="Local candidate model path or HF id.")
+    parser.add_argument("--model-api-base", default=None, help="OpenAI-compatible candidate API base URL.")
+    parser.add_argument("--model-api-key", default=None, help="Candidate API key. Defaults to MODEL_API_KEY or OPENAI_API_KEY.")
+    parser.add_argument("--model-api-model", default=None, help="Candidate model name exposed by the API.")
+    parser.add_argument("--model-api-workers", type=int, default=8)
+    parser.add_argument("--model-api-timeout", type=float, default=120.0)
+    parser.add_argument("--model-api-retries", type=int, default=3)
     parser.add_argument("--judge-model-path", default=None, help="Local DeepSeek-V4-Flash judge path or model id.")
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
@@ -952,6 +960,17 @@ def main() -> None:
     if args.sample_only and args.predictions_input is not None:
         raise RuntimeError("--sample-only cannot be combined with --predictions-input.")
 
+    model_api_enabled = bool(args.model_api_base or args.model_api_model)
+    if model_api_enabled and not (args.model_api_base and args.model_api_model):
+        raise RuntimeError("--model-api-base and --model-api-model must be provided together.")
+    if model_api_enabled and args.model_path:
+        raise RuntimeError("Choose either --model-path or the candidate API options, not both.")
+    if not model_api_enabled and not args.model_path and args.predictions_input is None:
+        raise RuntimeError("Set --model-path, or provide both --model-api-base and --model-api-model.")
+    model_api_key = args.model_api_key or os.environ.get("MODEL_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if model_api_enabled and not model_api_key:
+        raise RuntimeError("Candidate API key is required. Set MODEL_API_KEY/OPENAI_API_KEY or pass --model-api-key.")
+
     judge_api_enabled = bool(args.judge_api_base or args.judge_api_model)
     if judge_api_enabled and not (args.judge_api_base and args.judge_api_model):
         raise RuntimeError("--judge-api-base and --judge-api-model must be provided together.")
@@ -965,11 +984,12 @@ def main() -> None:
         raise RuntimeError("Judge API key is required. Set OPENAI_API_KEY/JUDGE_API_KEY or pass --judge-api-key.")
 
     judge_model_path = args.judge_model_path or args.model_path
-    same_judge = judge_model_path == args.model_path
+    same_judge = not model_api_enabled and judge_model_path == args.model_path
     judge_model_label = args.judge_api_model if judge_api_enabled else judge_model_path
+    candidate_model_label = args.model_api_model or args.model_path or "predictions"
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    run_name = args.run_name or f"{safe_model_name(args.model_path)}_{timestamp}"
+    run_name = args.run_name or f"{safe_model_name(candidate_model_label)}_{timestamp}"
     out_dir = args.output_root / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -977,7 +997,11 @@ def main() -> None:
     if not records:
         raise RuntimeError(f"No records loaded from {args.data}")
 
-    needs_vllm = args.predictions_input is None or not judge_api_enabled
+    needs_vllm = (
+        args.predictions_input is None and not model_api_enabled
+    ) or (
+        not args.sample_only and not judge_api_enabled
+    )
     LLM = SamplingParams = None
     if needs_vllm:
         LLM, SamplingParams = load_vllm()
@@ -985,6 +1009,30 @@ def main() -> None:
     candidate_llm = None
     if args.predictions_input:
         raw_outputs = load_raw_outputs_from_predictions(args.predictions_input, records)
+    elif model_api_enabled:
+        candidate_api_client = OpenAICompatibleClient(
+            api_base=args.model_api_base,
+            api_key=model_api_key,
+            model=args.model_api_model,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_tokens=args.max_tokens,
+            timeout=args.model_api_timeout,
+            retries=args.model_api_retries,
+        )
+        candidate_api_prompts = [("", build_candidate_prompt(record)) for record in records]
+        if args.no_resume:
+            raw_outputs = run_openai_judge_generation(
+                candidate_api_client, candidate_api_prompts, args.model_api_workers
+            )
+        else:
+            raw_outputs = run_openai_judge_generation_with_cache(
+                candidate_api_client,
+                candidate_api_prompts,
+                [str(record.get("id", idx)) for idx, record in enumerate(records)],
+                args.model_api_workers,
+                out_dir / "generation_raw.jsonl",
+            )
     else:
         llm_kwargs = {
             "model": args.model_path,
@@ -1080,7 +1128,7 @@ def main() -> None:
     judge_sampling = None
     judge_api_client = None
     if judge_api_enabled:
-        judge_api_client = OpenAICompatibleJudge(
+        judge_api_client = OpenAICompatibleClient(
             api_base=args.judge_api_base,
             api_key=judge_api_key,
             model=args.judge_api_model,
@@ -1249,7 +1297,7 @@ def main() -> None:
 
     metrics = {
         "num_examples": len(records),
-        "candidate_model": args.model_path,
+        "candidate_model": candidate_model_label,
         "judge_model": judge_model_label,
         "judge_backend": "openai_compatible_api" if judge_api_enabled else "vllm",
         "metric_scale": "0-100 percentage scale",

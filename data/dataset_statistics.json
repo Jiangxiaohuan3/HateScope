@@ -1,0 +1,15 @@
+{
+  "total": 1330,
+  "hate_count": 884,
+  "non_hate_count": 446,
+  "hate_percent": 66.47,
+  "non_hate_percent": 33.53,
+  "group_distribution": {
+    "地域歧视": 187,
+    "无": 446,
+    "其他歧视类型": 167,
+    "种族歧视": 194,
+    "性少数歧视": 147,
+    "性别歧视": 189
+  }
+}

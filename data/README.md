@@ -1,6 +1,6 @@
 # Data
 
-`hatescope_refined.jsonl` contains 1,931 deduplicated records from the archived refined pool. Only evaluation fields are retained; local provenance paths, raw source records, URLs, and email addresses have been removed.
+`hatescope_1330.jsonl` contains the final 1,330-example HateScope benchmark.
 
 Each line contains:
 
@@ -11,4 +11,7 @@ Each line contains:
 - `group`: discrimination type
 - `hateful`: binary label
 
-Distribution: 884 hateful and 1,047 non-hateful records. The paper's final 1,330-example split uses the same 884 hateful records and 446 quality-reviewed/resampled non-hateful records; its selection manifest was not available in the archived directory.
+Supporting files:
+
+- `selected_data_ids.json`: ordered IDs for all benchmark examples
+- `dataset_statistics.json`: label and category distribution
